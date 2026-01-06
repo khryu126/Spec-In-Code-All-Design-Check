@@ -2,52 +2,83 @@ import streamlit as st
 import pandas as pd
 import os
 
-st.set_page_config(page_title="자재 정보 통합 조회", layout="wide")
+st.set_page_config(page_title="유대리 스펙체크", layout="wide")
 
 @st.cache_data
 def load_data():
-    # 파일명이 대문자인지 소문자인지 확인해서 있는 것을 가져옵니다.
     spec_file = '스펙인코드.csv' if os.path.exists('스펙인코드.csv') else '스펙인코드.CSV'
     img_file = '이미지경로.csv' if os.path.exists('이미지경로.csv') else '이미지경로.CSV'
     
-    try:
-        # 인코딩도 한국어 엑셀에서 가장 흔한 두 가지를 다 시도합니다.
+    encodings = ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr']
+    spec_df = None
+    img_df = None
+
+    for enc in encodings:
         try:
-            spec = pd.read_csv(spec_file, encoding='utf-8-sig')
-            img = pd.read_csv(img_file, encoding='utf-8-sig')
-        except:
-            spec = pd.read_csv(spec_file, encoding='cp949')
-            img = pd.read_csv(img_file, encoding='cp949')
-            
-        merged = pd.merge(spec, img[['추출된_품번', '카카오톡_전송용_URL']], 
-                          left_on='품번', right_on='추출된_품번', how='left')
+            spec_df = pd.read_csv(spec_file, encoding=enc)
+            spec_df['품번'] = spec_df['품번'].astype(str).str.strip()
+            break
+        except: continue
+
+    for enc in encodings:
+        try:
+            img_df = pd.read_csv(img_file, encoding=enc)
+            # 이미지 파일의 품번 컬럼 이름도 정리
+            img_df['추출된_품번'] = img_df['추출된_품번'].astype(str).str.strip()
+            break
+        except: continue
+
+    if spec_df is not None and img_df is not None:
+        # [수정] how='outer'로 변경하여 양쪽 어디든 데이터가 있으면 다 가져옵니다.
+        merged = pd.merge(spec_df, img_df[['추출된_품번', '카카오톡_전송용_URL']], 
+                          left_on='품번', right_on='추출된_품번', how='outer')
+        
+        # [중요] 스펙 정보가 없는 경우(이미지 파일에만 있는 경우) 품번을 채워줍니다.
+        merged['품번'] = merged['품번'].fillna(merged['추출된_품번'])
+        
+        # 비어있는 정보는 깔끔하게 '-'로 채우기
+        merged = merged.fillna('-')
+        
         return merged
-    except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-        return None
+    return None
 
 df = load_data()
 
-# (이하 검색 UI 코드는 동일...)
 st.title("🏗️ 자재 스펙 & 이미지 통합 조회")
-query = st.text_input("🔍 검색어 입력 (대표코드, 품명, 품번)").strip()
+query = st.text_input("🔍 검색 (대표코드, 품명, 품번 입력)", "").strip()
 
-if query and df is not None:
-    results = df[df['대표코드'].str.contains(query, case=False, na=False) | 
-                 df['품명'].str.contains(query, case=False, na=False) | 
-                 df['품번'].str.contains(query, case=False, na=False)]
-    if not results.empty:
-        for _, row in results.iterrows():
-            st.markdown("---")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📋 자재 스펙")
-                st.info(f"**대표코드:** {row['대표코드']}")
-                st.write(f"**품명:** {row['품명']}")
-                st.write(f"**품번:** {row['품번']}")
-            with col2:
-                st.subheader("🖼️ 이미지")
-                if pd.notna(row.get('카카오톡_전송용_URL')):
-                    st.image(row['카카오톡_전송용_URL'], use_container_width=True)
-                else:
-                    st.warning("등록된 이미지가 없습니다.")
+if query:
+    if df is not None:
+        # 모든 검색 대상 컬럼을 문자열로 바꿔서 검색 (오류 방지)
+        mask = (df['대표코드'].astype(str).str.contains(query, case=False, na=False) | 
+                df['품명'].astype(str).str.contains(query, case=False, na=False) | 
+                df['품번'].astype(str).str.contains(query, case=False, na=False))
+        results = df[mask]
+        
+        if not results.empty:
+            st.write(f"✅ 총 **{len(results)}**건의 자재가 검색되었습니다.")
+            for _, row in results.iterrows():
+                st.markdown("---")
+                col1, col2 = st.columns([1, 1.2])
+                with col1:
+                    st.subheader("📋 자재 정보")
+                    st.markdown(f"**🔹 대표코드:** {row.get('대표코드', '-')}")
+                    st.markdown(f"**🔹 품명:** {row.get('품명', '-')}")
+                    st.markdown(f"**🔹 품번:** {row.get('품번', '-')}")
+                    st.markdown(f"**🔹 경면(전면):** {row.get('경면(전면)', '-')}")
+                    st.markdown(f"**🔹 임가공처:** {row.get('임가공처', '-')}")
+                with col2:
+                    st.subheader("🖼️ 이미지 확인")
+                    url = row.get('카카오톡_전송용_URL')
+                    if pd.notna(url) and str(url).startswith('http'):
+                        try:
+                            st.image(url, use_container_width=True)
+                            st.caption(f"🔗 [고화질 원본 보기]({url})")
+                        except:
+                            st.write("❌ 이미지를 불러올 수 없습니다.")
+                    else:
+                        st.write("이미지 준비 중입니다.")
+        else:
+            st.write("📍 검색 결과가 없습니다.")
+    else:
+        st.error("데이터 로드 실패")
